@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Rust
+tui_rs/target/
+
+# Data & logs
+data/
+logs/
+
+# Runtime
+.crawler.lock
+
+# IDE / tools

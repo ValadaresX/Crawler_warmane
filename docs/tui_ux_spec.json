@@ -1,0 +1,456 @@
+{
+  "_meta": {
+    "purpose": "Especificação completa das 2 telas da TUI Rust para redesign de UX",
+    "framework": "ratatui 0.30.0 (Rust) + crossterm 0.29",
+    "target_terminal": "120x30 mínimo, 160x40 ideal, suporte a 80x24 com degradação",
+    "runtime_environment": "Raspberry Pi 4 (ARM, 4 cores, 7GB RAM) — SSH + tmux típico",
+    "charset": "Unicode (braille, box drawing, block elements) com fallback ASCII via --ascii",
+    "color_support": "TrueColor (RGB) — terminais modernos; cores WoW para classes",
+    "refresh_rate": "0.8s dados, ~12fps render (configável)",
+    "idioma_interface": "Português do Brasil (pt-BR) obrigatório para labels, hints e mensagens"
+  },
+
+  "architecture": {
+    "navigation_model": "2 abas fixas (Dashboard, Config) com footer contextual",
+    "tab_switching": "Teclas 1/2 diretas, Tab/Shift+Tab cíclico",
+    "global_layout": {
+      "rows": [
+        { "id": "tabs_bar", "height": 3, "description": "Barra de abas + título da tela ativa" },
+        { "id": "body", "height": "Min(10) — ocupa todo espaço restante", "description": "Conteúdo principal, muda por aba" },
+        { "id": "footer", "height": 3, "description": "Barra de status e hotkeys, contextual por aba e estado do crawler" }
+      ]
+    },
+    "state_source": "JSON file polling — o crawler Python escreve adaptive_crawler_runtime.json, a TUI lê a cada 0.8s",
+    "ipc_commands": "TUI escreve tui_commands.json (start/pause/cancel), crawler lê e deleta a cada ciclo",
+    "ipc_config": "TUI escreve tui_config.json (Enter na aba Config), crawler aplica no próximo ciclo"
+  },
+
+  "data_model": {
+    "snapshot_fields": {
+      "cycle": { "type": "u64", "description": "Número do ciclo atual do crawler (incrementa a cada iteração do loop principal)" },
+      "phase": { "type": "string", "values": ["discover", "convert", "hybrid"], "display_labels": { "discover": "descoberta", "convert": "atualização", "hybrid": "misto" } },
+      "players_total": { "type": "u64", "description": "Total de players únicos descobertos no grafo (nunca diminui)" },
+      "dataset_total": { "type": "u64", "description": "Total de players cujo perfil completo foi coletado e processado" },
+      "failed_total": { "type": "u64", "description": "Players que falharam na coleta de perfil (404, timeout, etc.)" },
+      "delay_x": { "type": "f64", "range": [0.0, 10.0], "description": "Fator multiplicador de delay adaptativo — 1.0 = normal, >1 = throttled, <1 = agressivo" },
+      "err_seq": { "type": "u64", "range": [0, 100], "description": "Contagem de erros HTTP consecutivos sem sucesso — 0 é saudável, >5 é preocupante" },
+      "lat_ema_ms": { "type": "f64", "unit": "milissegundos", "description": "Latência média exponencialmente ponderada das requisições HTTP" },
+      "history_roots": { "type": "u64", "description": "Quantos players tiveram seu match history aberto neste ciclo" },
+      "details_done": { "type": "u64", "description": "Páginas de detalhes de partida já processadas neste ciclo" },
+      "details_target": { "type": "u64", "description": "Meta de páginas de detalhes para este ciclo" },
+      "players_new": { "type": "u64", "description": "Novos players descobertos neste ciclo (via grafo de partidas)" },
+      "profiles_try": { "type": "u64", "description": "Tentativas de coleta de perfil neste ciclo" },
+      "profiles_ok": { "type": "u64", "description": "Perfis coletados com sucesso neste ciclo" },
+      "profiles_fail": { "type": "u64", "description": "Perfis que falharam neste ciclo" },
+      "class_counts": { "type": "[u64; 10]", "description": "Contagem de players por classe WoW, ordem fixa: DK, Warrior, Paladin, Hunter, Rogue, Priest, Shaman, Mage, Warlock, Druid" },
+      "ts_hms": { "type": "string", "format": "HH:MM:SS", "description": "Hora local do último refresh" }
+    },
+    "crawler_status": {
+      "type": "enum",
+      "values": ["Running", "Paused", "Stopped", "Unknown"],
+      "source": "Campo crawler_status no runtime JSON, com fallback para inferência do campo stage",
+      "description": "Estado atual do processo crawler Python — reflete o que ele reportou, não o que a TUI comandou"
+    },
+    "class_metadata": {
+      "order": ["Death Knight", "Warrior", "Paladin", "Hunter", "Rogue", "Priest", "Shaman", "Mage", "Warlock", "Druid"],
+      "colors_rgb": {
+        "Death Knight": [196, 31, 59],
+        "Warrior": [199, 156, 110],
+        "Paladin": [245, 140, 186],
+        "Hunter": [171, 212, 115],
+        "Rogue": [255, 245, 105],
+        "Priest": [255, 255, 255],
+        "Shaman": [0, 112, 222],
+        "Mage": [105, 204, 240],
+        "Warlock": [148, 130, 201],
+        "Druid": [255, 125, 10]
+      },
+      "note": "Cores oficiais das classes WoW 3.3.5a (WotLK) — devem ser mantidas"
+    }
+  },
+
+  "screens": {
+    "dashboard": {
+      "id": "ActiveTab::Dashboard",
+      "title": "WARMANE CRAWLER DASHBOARD",
+      "description": "Tela principal de monitoramento em tempo real. Exibe todas as métricas do crawler em execução: classes coletadas, saúde da rede, progresso da coleta, gráfico temporal e ritmo de descoberta.",
+
+      "current_layout": {
+        "body_split": "horizontal 58%/42%",
+        "left_panel": {
+          "title": "Players Coletados por Classe",
+          "sections": [
+            {
+              "id": "classes_table",
+              "widget": "Table",
+              "height": "Min(11)",
+              "columns": ["Classe (13ch)", "Qtd (8ch)", "Gráfico (barra horizontal, restante)"],
+              "data": "10 classes WoW, cada uma com contagem e barra proporcional ao máximo",
+              "visual_details": {
+                "bar_char": "█ (unicode) ou # (ascii)",
+                "bar_width": "clamp(terminal_width - 28, 8, 44)",
+                "each_row_colored": "Cor da classe WoW correspondente (texto + barra)",
+                "header": "Classe | Qtd | Gráfico em cinza"
+              }
+            },
+            {
+              "id": "total_chart",
+              "widget": "Chart (line graph)",
+              "height": 14,
+              "description": "Gráfico de linha mostrando evolução de players_total nos últimos 5 minutos",
+              "axes": {
+                "x": { "label": "tempo", "window": "300 segundos", "labels": ["-5m", "-2m30s", "agora"] },
+                "y": { "label": "players", "labels": ["min", "médio", "max"] }
+              },
+              "marker": "Braille (unicode) ou Dot (ascii)",
+              "line_color": "Cyan",
+              "sub_lines": [
+                "x(tempo): últimos 300s [x0 | xm | x1] (amostragem=2.2)",
+                "y(players): min=N max=N atual=N"
+              ],
+              "sampling": "Exponencial (exp_x=2.2) — mais resolução no final (dados recentes)"
+            }
+          ]
+        },
+        "right_panel": {
+          "title": "Visão Operacional Avançada",
+          "sections": [
+            {
+              "id": "live_header",
+              "height": 2,
+              "content": "⠋ Painel Ao Vivo  ciclo=512  fase=misto  hora=14:32:05",
+              "details": "Spinner animado (braille 10 frames), ciclo, fase traduzida, hora local"
+            },
+            {
+              "id": "category_1_summary",
+              "height": 3,
+              "title": "Categoria 1 | Resumo Geral",
+              "title_color": "Cyan",
+              "lines": [
+                "jogadores=68421  base=20145  falhas=9500",
+                "mudança ciclo: jogadores=+12  base=+3  novos=7"
+              ],
+              "note": "Delta calculado entre snapshot atual e anterior"
+            },
+            {
+              "id": "category_2_health",
+              "height": 3,
+              "title": "Categoria 2 | Saúde Da Conexão",
+              "title_color": "Cyan",
+              "lines": [
+                "qualidade=MUITO BOA (85/100) — colorido por gradiente verde→vermelho",
+                "tempo médio=550ms  atraso=660ms  fator=1.20x  falhas_seq=0"
+              ],
+              "scoring": {
+                "net_health_score": "100 - (err_seq*11).min(45) - ((lat_ema_ms-350).max(0)/25).min(30) - ((delay_x-1).max(0)*25).min(25)",
+                "labels": { ">=80": "MUITO BOA (verde)", ">=60": "BOA (verde claro)", ">=40": "INSTÁVEL (amarelo)", "<40": "CRÍTICA (vermelho)" }
+              }
+            },
+            {
+              "id": "health_gauges",
+              "height": 4,
+              "widget": "3x Gauge (barras de progresso horizontais)",
+              "gauges": [
+                { "label": "qualidade N%", "ratio": "score/100", "color": "dinâmica por score" },
+                { "label": "latência Nms", "ratio": "ratio_between(lat, 220, 1800)", "color": "gradiente verde→vermelho" },
+                { "label": "falhas seguidas N", "ratio": "ratio_between(err_seq, 0, 8)", "color": "gradiente verde→vermelho" }
+              ]
+            },
+            {
+              "id": "category_3_collection",
+              "height": 3,
+              "title": "Categoria 3 | Andamento Da Coleta",
+              "title_color": "Cyan",
+              "lines": [
+                "históricos_abertos=10  detalhes=20/120 (16.7%)",
+                "perfis=150/220 (68.2%)  falhas_perfil=12"
+              ]
+            },
+            {
+              "id": "collection_gauges",
+              "height": 4,
+              "widget": "2x Gauge",
+              "gauges": [
+                { "label": "detalhes N%", "ratio": "details_done/details_target", "color": "Cyan" },
+                { "label": "perfis N%", "ratio": "profiles_ok/profiles_try", "color": "Green" }
+              ]
+            },
+            {
+              "id": "category_4_pace",
+              "height": 2,
+              "title": "Categoria 4 | Ritmo Recente",
+              "title_color": "Cyan",
+              "line": "média_24=7.2  mínimo=0  máximo=24",
+              "note": "Estatísticas dos últimos 24 snapshots de players_new"
+            },
+            {
+              "id": "sparkline",
+              "height": "Min(3) — expande se sobrar espaço",
+              "widget": "Sparkline",
+              "title": "novos por ciclo | atividade=•••",
+              "data": "Últimos 48 valores de players_new (invertidos cronologicamente)",
+              "color": "LightBlue",
+              "animation": "Indicador de pulso (•  → •• → ••• → •• →  •) a cada frame"
+            }
+          ]
+        }
+      },
+
+      "footer_dashboard": {
+        "varies_by_status": true,
+        "variants": {
+          "running": {
+            "border_color": "Green",
+            "title_badge": " COLETANDO  — fundo verde, texto preto, bold",
+            "text": "COLETANDO  [S]Pausar [X]Cancelar  r=revisita | 1/2=aba  q+q=sair"
+          },
+          "paused": {
+            "border_color": "Yellow",
+            "title_badge": " PAUSADO  — fundo amarelo, texto preto, bold",
+            "text": "PAUSADO  [S]Retomar [X]Cancelar  r=revisita | 1/2=aba  q+q=sair"
+          },
+          "stopped": {
+            "border_color": "Red",
+            "title_badge": " PARADO  — fundo vermelho, texto preto, bold",
+            "text": "PARADO  [S]Iniciar  r=revisita | 1/2=aba  q+q=sair"
+          },
+          "unknown": {
+            "border_color": "DarkGray",
+            "title_badge": " DESCONHECIDO  — fundo cinza, texto preto, bold",
+            "text": "DESCONHECIDO  [S]Iniciar | 1/2=aba  q+q=sair"
+          }
+        },
+        "temporary_messages": [
+          { "trigger": "Tecla S pressionada", "text": "[Pausa solicitada]", "duration_seconds": 5 },
+          { "trigger": "Tecla X pressionada", "text": "[Cancelamento solicitado]", "duration_seconds": 5 },
+          { "trigger": "Tecla R pressionada", "text": "[Revisita solicitada!]", "duration_seconds": 5 }
+        ]
+      }
+    },
+
+    "config": {
+      "id": "ActiveTab::Config",
+      "title": "CONFIGURAÇÃO DO CRAWLER",
+      "description": "Tela de edição de parâmetros do crawler. Permite alterar rate limit, delays, limites por ciclo e features. Alterações são salvas em tui_config.json e aplicadas pelo crawler no próximo ciclo.",
+
+      "current_layout": {
+        "body": "Tela cheia (100% width), conteúdo como Paragraph com Wrap",
+        "rendering_approach": "Vec<Line> construída iterando por grupo → campos, renderizada como Paragraph único"
+      },
+
+      "groups": [
+        {
+          "id": "ConfigGroup::Network",
+          "title": "── Rede ──",
+          "title_style": "Cyan + Bold",
+          "fields": [
+            {
+              "label": "Rate limit (RPS)",
+              "key": "rps",
+              "kind": "Float",
+              "default": "0.90",
+              "hint": "Máximo de requisições HTTP por segundo ao servidor Warmane",
+              "maps_to_crawler_arg": "http_rps"
+            },
+            {
+              "label": "Delay mínimo (s)",
+              "key": "delay_min",
+              "kind": "Float",
+              "default": "1.30",
+              "hint": "Tempo mínimo de espera entre requisições consecutivas",
+              "maps_to_crawler_arg": "pause_min"
+            },
+            {
+              "label": "Delay máximo (s)",
+              "key": "delay_max",
+              "kind": "Float",
+              "default": "3.10",
+              "hint": "Tempo máximo de espera entre requisições (jitter aleatório)",
+              "maps_to_crawler_arg": "pause_max"
+            }
+          ]
+        },
+        {
+          "id": "ConfigGroup::Collection",
+          "title": "── Coleta ──",
+          "title_style": "Cyan + Bold",
+          "fields": [
+            {
+              "label": "History players/ciclo",
+              "key": "history_players_per_cycle",
+              "kind": "Int",
+              "default": "10",
+              "hint": "Quantos players têm seu match history escaneado por ciclo",
+              "maps_to_crawler_arg": "history_players_per_cycle"
+            },
+            {
+              "label": "Profiles/ciclo",
+              "key": "profiles_per_cycle",
+              "kind": "Int",
+              "default": "3",
+              "hint": "Quantos perfis completos (gear, stats) são coletados por ciclo",
+              "maps_to_crawler_arg": "profiles_per_cycle"
+            },
+            {
+              "label": "Matchinfo/ciclo",
+              "key": "max_matchinfo_per_cycle",
+              "kind": "Int",
+              "default": "120",
+              "hint": "Limite de páginas de detalhes de partida processadas por ciclo",
+              "maps_to_crawler_arg": "max_matchinfo_per_cycle"
+            }
+          ]
+        },
+        {
+          "id": "ConfigGroup::Features",
+          "title": "── Funcionalidades ──",
+          "title_style": "Cyan + Bold",
+          "fields": [
+            {
+              "label": "Coletar talentos",
+              "key": "collect_talents",
+              "kind": "Bool",
+              "default": "false",
+              "display": "[ ON  ] / [ OFF ]",
+              "hint": "Busca a página /talents de cada player (+1 request por perfil)",
+              "maps_to_crawler_arg": "collect_talents"
+            },
+            {
+              "label": "Revisita automática",
+              "key": "recollect_missing_fields",
+              "kind": "Bool",
+              "default": "false",
+              "display": "[ ON  ] / [ OFF ]",
+              "hint": "Recoleta players que não têm guild, profissões ou talentos",
+              "maps_to_crawler_arg": "recollect_missing_fields"
+            }
+          ]
+        }
+      ],
+
+      "field_rendering": {
+        "selected_field": {
+          "indicator": "▶ ",
+          "label_style": "Yellow + Bold",
+          "value_style": "Yellow"
+        },
+        "unselected_field": {
+          "indicator": "  (2 espaços)",
+          "label_style": "White",
+          "value_style": "Green"
+        },
+        "label_padding": "28 chars (left-aligned)",
+        "value_format_numeric": "[ valor ]",
+        "value_format_bool": "[ ON  ] ou [ OFF ]",
+        "hint_line": {
+          "indent": "5 espaços",
+          "style": "DarkGray",
+          "position": "Linha imediatamente abaixo do campo"
+        },
+        "spacing": "1 linha em branco entre cada campo"
+      },
+
+      "footer_config": {
+        "border_color": "Cyan",
+        "text": "Enter=salvar  Esc=voltar  Espaço=toggle  | 1/2=aba  q+q=sair",
+        "dirty_indicator": "* Alterações pendentes — aparece quando qualquer campo foi editado",
+        "status_message": "[Config salva!] ou [Erro: ...] — aparece após Enter"
+      }
+    }
+  },
+
+  "keybindings": {
+    "global_any_tab": {
+      "q+q": { "action": "Sair da TUI (quit duplo em 2s)", "guard": "Ignora nos primeiros 1.5s após abertura" },
+      "1": { "action": "Ir para aba Dashboard" },
+      "2": { "action": "Ir para aba Config" },
+      "Tab": { "action": "Próxima aba (cíclico)" },
+      "Shift+Tab": { "action": "Aba anterior (cíclico)" }
+    },
+    "dashboard_only": {
+      "s / S": { "action": "Toggle Start/Pause — se Running envia Pause, senão envia Start" },
+      "x / X": { "action": "Cancel — solicita encerramento gracioso do crawler" },
+      "r / R": { "action": "Solicitar revisita de players com campos ausentes" },
+      "Esc": { "action": "Sair (só se --esc-quit habilitado)", "conditional": true }
+    },
+    "config_only": {
+      "Up/Down": { "action": "Navegar entre campos" },
+      "0-9 e .": { "action": "Editar valor numérico do campo selecionado (Float/Int)" },
+      "Backspace": { "action": "Apagar último caractere do campo numérico" },
+      "Espaço": { "action": "Toggle booleano (ON/OFF)" },
+      "Left/Right": { "action": "Toggle booleano (alternativo)" },
+      "Enter": { "action": "Salvar configuração em tui_config.json" },
+      "Esc": { "action": "Voltar para Dashboard descartando alterações" }
+    }
+  },
+
+  "color_palette": {
+    "backgrounds": "Terminal default (sem fundo explícito)",
+    "primary_text": "White",
+    "secondary_text": "Gray",
+    "muted_text": "DarkGray",
+    "accent": "Cyan (títulos de categoria, bordas Config, gauges)",
+    "success": "Green (status Running, gauge perfis, valores não selecionados)",
+    "warning": "Yellow (status Paused, campo selecionado, terminal pequeno)",
+    "danger": "Red (status Stopped)",
+    "dynamic_gradient": "gradient_green_red(ratio) — interpola RGB(39,174,96)→RGB(192,57,43) para latência e erros",
+    "health_labels": {
+      ">=80": "Green (MUITO BOA)",
+      ">=60": "LightGreen (BOA)",
+      ">=40": "Yellow (INSTÁVEL)",
+      "<40": "Red (CRÍTICA)"
+    },
+    "sparkline": "LightBlue",
+    "chart_line": "Cyan"
+  },
+
+  "animations": {
+    "spinner": {
+      "frames_unicode": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+      "frames_ascii": ["|", "/", "-", "\\"],
+      "location": "Antes de 'Painel Ao Vivo' no live_header"
+    },
+    "pulse": {
+      "frames_unicode": ["•  ", "•• ", "•••", " ••", "  •"],
+      "frames_ascii": [".  ", ".. ", "...", " ..", "  ."],
+      "location": "Título da sparkline 'atividade='"
+    }
+  },
+
+  "ratatui_widgets_used": {
+    "Tabs": "Barra de abas (draw_tabs_bar)",
+    "Block": "Bordas e títulos de painéis",
+    "Paragraph": "Texto formatado com Spans coloridos (maioria das seções)",
+    "Table": "Tabela de classes com 3 colunas",
+    "Chart": "Gráfico de linha temporal (total_chart)",
+    "Gauge": "Barras de progresso horizontais (5 instâncias: qualidade, latência, erros, detalhes, perfis)",
+    "Sparkline": "Mini-gráfico de barras verticais (novos/ciclo)",
+    "Layout": "Divisão vertical e horizontal aninhada",
+    "Wrap": "Text wrapping para Paragraph"
+  },
+
+  "constraints_and_rules": {
+    "no_panic": "A TUI nunca deve dar panic — todos os campos JSON podem estar ausentes",
+    "no_unwrap": "clippy::unwrap_used = deny — usar unwrap_or, .ok(), etc.",
+    "no_unsafe": "unsafe_code = forbid",
+    "graceful_degradation": "Terminal menor que 120x30 → aviso amarelo, sem crash",
+    "ascii_fallback": "Flag --ascii troca braille por dots, █ por #, spinners por |/-\\",
+    "quit_safety": "q+q em 2 segundos (duplo) para evitar saída acidental — guard de 1.5s no startup",
+    "footer_badge": "O badge de status (COLETANDO/PAUSADO/PARADO) tem fundo colorido (bg=status_color, fg=Black) para destaque visual forte",
+    "state_is_readonly": "A TUI nunca modifica o runtime JSON do crawler — ela lê. Para comandar, escreve tui_commands.json ou tui_config.json",
+    "config_not_applied_instantly": "Alterações na Config só chegam ao crawler no próximo ciclo (~2-30s dependendo da fase)"
+  },
+
+  "known_ux_issues_to_improve": [
+    "O painel direito é muito denso — 8 seções verticais empilhadas com pouco espaço entre elas",
+    "Os rótulos 'Categoria N |' são genéricos e ocupam espaço — poderiam ser ícones ou mais concisos",
+    "O gráfico total_chart ocupa 14 linhas fixas no painel esquerdo mesmo com poucos dados",
+    "A aba Config é um Paragraph simples — não tem bordas por grupo, não tem scroll, campos podem sumir se terminal for pequeno",
+    "Não há indicação visual de qual campo está sendo editado além da cor (sem cursor piscante ou underline)",
+    "O footer do Dashboard é texto puro denso — os hotkeys poderiam ter melhor hierarquia visual",
+    "Não há separação visual forte entre o badge de status e as ações disponíveis no footer",
+    "A sparkline não tem labels de eixo Y (apenas o título)",
+    "Falta um resumo compacto no topo do Dashboard com os KPIs mais importantes (total, novos/min, latência)",
+    "As barras de gauge não têm marcas de referência ou thresholds visuais"
+  ]
+}

@@ -1,0 +1,27 @@
+[package]
+name = "crawler_tui_rs"
+version = "1.0.0"
+edition = "2021"
+description = "Dashboard TUI em Rust acoplado ao estado do crawler Warmane"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+ratatui = { version = "0.30.0", default-features = false, features = ["crossterm"] }
+serde_json = "1.0"
+tempfile = "3"
+
+[dev-dependencies]
+proptest = "1.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused = { level = "deny", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

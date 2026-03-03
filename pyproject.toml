@@ -1,0 +1,98 @@
+[project]
+name = "check-players"
+version = "1.0.0"
+description = "Pipeline offline + crawler/TUI para estimativa de GS (WoW 3.3.5)."
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+fix = true
+extend-exclude = [
+  ".venv",
+  ".pytest_cache",
+  "data",
+  "artifacts",
+  "reports",
+  "exports",
+  "logs",
+  "catboost_info",
+  "tui_rs/target",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "W",
+  "I",
+  "N",
+  "UP",
+  "B",
+  "FURB",
+  "PTH",
+  "SIM",
+  "S",
+  "FBT",
+  "DTZ",
+  "TRY",
+  "RET",
+  "PERF",
+  "ANN",
+  "C90",
+  "PLR",
+  "TCH",
+  "TID",
+  "ERA",
+  "SLF",
+  "ARG",
+  "RUF",
+]
+ignore = [
+  "E501",
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+known-first-party = [
+  "armory",
+  "crawler",
+  "tui_rs",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "ANN", "PLR2004", "ARG"]
+"subprojetos/**/tests/*" = ["S101", "ANN", "PLR2004", "ARG"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "subprojetos.*"
+ignore_errors = true
+
+[tool.ty.rules]
+unused-ignore-comment = "warn"
+redundant-cast = "warn"
+possibly-unresolved-reference = "error"
+possibly-missing-import = "error"
+possibly-missing-attribute = "error"
+invalid-argument-type = "error"
+missing-argument = "error"
+unsupported-operator = "error"
+
+[tool.ty.terminal]
+error-on-warning = true
